@@ -216,14 +216,33 @@ jobs:
       LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      # The repository at the PR head, at the workspace root, so `./.github/actions/…` resolves to
-      # YOUR build action as this pull request has it.
-      - name: Check out the app at the PR head
+      # The default branch first: the build action that runs is the one on it — reviewed and
+      # merged — never one a pull request rewrote. It is kept aside, the PR head is checked out
+      # over it, and then it is put back.
+      - name: Check out the default branch
         uses: actions/checkout@v4
-      - name: Fetch the PR head
+      - name: Keep the default branch's build actions
+        run: |
+          mkdir -p "$RUNNER_TEMP/lime-build-actions"
+          for d in .github/actions/lime-build .github/actions/lime-build-android .github/actions/lime-build-ios; do
+            if [ -f "$d/action.yml" ]; then cp -R "$d" "$RUNNER_TEMP/lime-build-actions/"; echo "Using $d from the default branch."; fi
+          done
+      - name: Check out the app at the PR head
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh pr checkout ${{ github.event.issue.number }}
+      # The default branch's build actions win. A pull request's own copy is used only where the
+      # default branch has none — the pull request that adds the build action in the first place.
+      # A branch made before the action existed then still builds.
+      - name: Put the build actions in place
+        run: |
+          mkdir -p .github/actions
+          for d in "$RUNNER_TEMP"/lime-build-actions/*; do
+            [ -d "$d" ] || continue
+            rm -rf ".github/actions/$(basename "$d")"
+            cp -R "$d" .github/actions/
+          done
+          ls -d .github/actions/lime-build* 2>/dev/null || echo "No build action on the default branch or in this pull request."
 
       # Your build. Per-platform action first, the plain one as a fallback.
       - name: Build the app (your lime-build-${{ env.PLATFORM }} action)
