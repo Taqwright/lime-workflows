@@ -191,9 +191,16 @@ jobs:
           LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
           LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          # Through the environment, never pasted into the script: it is text someone typed.
+          GOAL: ${{ steps.goal.outputs.goal }}
         run: |
           npx -y "$LIME_CLI" pr reply --kind ack
-          npx -y "$LIME_CLI" pr reply --kind started --tests "${{ steps.goal.outputs.who }}" --run-url "$RUN"
+          # The head this run builds, so the reply names it rather than the last analysed one.
+          HEAD="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid 2>/dev/null || true)"
+          npx -y "$LIME_CLI" pr reply --kind started --tests "${{ steps.goal.outputs.who }}" \
+            --goal "$GOAL" --head "$HEAD" --run-url "$RUN"
 
   automate:
     needs: parse
@@ -352,15 +359,16 @@ jobs:
         if: always()
         env:
           LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+          GOAL: ${{ needs.parse.outputs.goal }}
           WHO: ${{ needs.parse.outputs.who }}
         run: |
           if [ -n "${{ steps.pr.outputs.url }}" ]; then
-            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:added" \
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:added" --goal "$GOAL" \
               --test-pr-url "${{ steps.pr.outputs.url }}" --run-url "$RUN"
           elif [ "${{ steps.pr.outputs.covered }}" = "true" ]; then
-            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:passed" --run-url "$RUN"
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:passed" --goal "$GOAL" --run-url "$RUN"
           elif [ "${{ steps.record.outcome }}" = "failure" ]; then
-            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:stuck" --run-url "$RUN"
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:stuck" --goal "$GOAL" --run-url "$RUN"
           else
             npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN"
           fi
