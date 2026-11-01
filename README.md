@@ -230,10 +230,73 @@ the test repository's own workflow, and the Taqwright GitHub App opens the pull 
 
 ## Self-hosted runners
 
-Install once on the machine: **git**, **Node.js 20**, **gh** and **jq**, plus your build's own
-toolchain (Android SDK with `ANDROID_HOME`, or Xcode, CocoaPods and signing for iOS). A runner's
-PATH is captured when it is configured, so after installing anything run
-`echo "$PATH" > .path && ./svc.sh stop && ./svc.sh start` in the runner's folder.
+GitHub's machines come with a clean, known toolset. Your own machine comes with whatever is
+already on it, and that is where first runs fail: a tool that is missing, too new or too old, or
+a setting meant for the person who uses the machine. Work through this list once per machine.
+
+### Checklist
+
+**Before you start**
+
+- [ ] The Taqwright GitHub App is installed on the **app** repository and the **test** repository.
+- [ ] LIME has a project with the test repository bound to it (LIME → Integrations → GitHub →
+      Automation setup).
+- [ ] You have a LIME CI token (Settings → Access), and your cloud provider's username and access key.
+
+**The machine**
+
+- [ ] The runner is registered on **private** repositories only (see [Security](#security)), and
+      runs as a service: `./svc.sh install && ./svc.sh start`. A dedicated user is best: anything
+      in that user's home directory is visible to the jobs.
+- [ ] Installed: **git**, **Node.js 20**, **gh** and **jq**. Check with
+      `git --version && node --version && gh --version && jq --version`.
+- [ ] Android: the Android SDK, with `ANDROID_HOME` set. **Java comes from your build action**
+      (`actions/setup-java`), not the machine: a machine's default JDK is often newer than your
+      Gradle supports.
+- [ ] iOS: Xcode and its command line tools, CocoaPods, and your signing certificate and
+      provisioning profile, or `fastlane match`.
+- [ ] **No global lime-cli.** Run `npm ls -g @taqwright/lime-cli`, and if it is there,
+      `npm uninstall -g @taqwright/lime-cli`. The workflows run `@taqwright/lime-cli@latest`.
+      An old global copy has answered in its place before.
+- [ ] **Refresh the runner's PATH after installing anything.** The runner saves PATH when it is
+      configured and never reads it again. In the runner's folder:
+      `echo "$PATH" > .path && ./svc.sh stop && ./svc.sh start`.
+
+**The repositories**
+
+- [ ] The repository variable `LIME_RUNNER` is set to the runner's labels as a JSON list, for
+      example `["self-hosted","macOS","ARM64"]`, on **both** repositories. For iOS on a different
+      machine, also set `LIME_RUNNER_IOS` on the app repository.
+- [ ] Secrets on the **app** repository: `LIME_CI_TOKEN`, plus `LT_USERNAME` and `LT_ACCESS_KEY`
+      (or `BROWSERSTACK_USERNAME` and `BROWSERSTACK_ACCESS_KEY`).
+- [ ] Secrets on the **test** repository: `LIME_CI_TOKEN` and `ANTHROPIC_API_KEY` (or your coding
+      agent's key).
+- [ ] Automation setup shows every row green: both app workflows say *Uses lime-workflows @v1*,
+      the build action says *Yours*, and the test workflow is current. Merge LIME's pull requests
+      first: the build action is taken from the **default branch**.
+- [ ] Your build action builds **your** app: the Java version, the Flutter version, flavours,
+      signing. `artifact-<platform>` in `automate.yml` must name the file it leaves.
+
+**The first run**
+
+- [ ] Open a small pull request on the app repository. The impact comment appears within a few
+      minutes, posted by the Taqwright App.
+- [ ] Comment `/automate 1` on it. The Taqwright App reacts with 👀 and says what it is
+      automating, and in about ten minutes it replies with a link to a test pull request in the
+      test repository.
+
+### When a first run fails
+
+| What you see | Why | Fix |
+|---|---|---|
+| The job waits for a runner and never starts | `LIME_RUNNER`'s labels do not match the runner's, or the runner is offline | Compare the labels with Settings → Actions → Runners |
+| `gh: command not found` (or `jq`, `node`) right after installing it | The runner still has its old PATH | Refresh it (above) |
+| `Unsupported class file major version` in the build | The machine's default JDK is newer than your Gradle supports | Set `java-version` with `actions/setup-java` in your build action |
+| `--goal is required` when commenting `/automate 2` | An old global lime-cli answered instead of `@latest` | `npm uninstall -g @taqwright/lime-cli` |
+| `No build action` | The build action is not on the default branch yet | Merge LIME's setup pull request |
+| `… does not exist` after the build | `artifact-<platform>` does not name the file your build leaves | Fix the path in `automate.yml`, or the build |
+| The test repository's job stalls on its coding-agent step | The agent picked up the machine user's own settings or login | Keep `taqwright-automate.yml` current: it runs the agent with a config folder of its own |
+| `401` from LIME | A secret is missing or holds the wrong token | Re-create `LIME_CI_TOKEN` from Settings → Access |
 
 ## Versions
 
