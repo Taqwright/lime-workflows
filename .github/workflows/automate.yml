@@ -166,7 +166,8 @@ jobs:
             [0-9]|[0-9][0-9]|\#[0-9]|\#[0-9][0-9])
               N="${GOAL#\#}"
               if ! SUG="$(npx -y "$LIME_CLI" pr --suggestion "$N")"; then
-                npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN" || true
+                # The number goes with it, so LIME can say why: usually a newer push replaced the list.
+                npx -y "$LIME_CLI" pr reply --kind failed --tests "$N:failed" --run-url "$RUN" || true
                 echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
               fi
               GOAL="$(printf '%s' "$SUG" | jq -r .goal)"
