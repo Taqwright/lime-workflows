@@ -27,7 +27,8 @@ jobs:
     with:
       project: My App                                   # an existing LIME project
       runner: ${{ vars.LIME_RUNNER || '["ubuntu-latest"]' }}
-    secrets: inherit
+    secrets:
+      LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
 ```
 
 ### `.github/workflows/automate.yml`
@@ -51,7 +52,10 @@ jobs:
       device-android: Pixel 8
       os-android: '14'
       artifact-android: app/build/outputs/apk/debug/app-debug.apk
-    secrets: inherit
+    secrets:                                            # only what it needs, never `inherit`
+      LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+      LT_USERNAME: ${{ secrets.LT_USERNAME }}           # or BROWSERSTACK_USERNAME / _ACCESS_KEY
+      LT_ACCESS_KEY: ${{ secrets.LT_ACCESS_KEY }}
 ```
 
 `/automate 2` records suggestion 2 from the impact comment, and `/automate <goal>` records your own
@@ -179,6 +183,7 @@ runs:
 | `os-android` / `os-ios` | `14` / `17` | Exact provider OS version |
 | `artifact-android` / `artifact-ios` | Gradle's debug APK / (none) | Where your build action leaves the installable file |
 | `lime-cli-version` | `latest` | Pin `@taqwright/lime-cli` if you need to |
+| `allow-fork-prs` | `false` | Run on pull requests from forks. Leave it off; label one PR `lime-allow-fork` instead |
 | `timeout-minutes` | `45` | For the build-and-record job |
 
 ### `pr-impact.yml`
@@ -192,7 +197,8 @@ runs:
 
 ## Secrets
 
-Pass them with `secrets: inherit`, or name them one by one.
+**Name them one by one**, as in the callers above. `secrets: inherit` works, but it hands this
+workflow **every** secret in your repository, when it needs only these:
 
 | Secret | Needed by |
 |---|---|
@@ -202,6 +208,23 @@ Pass them with `secrets: inherit`, or name them one by one.
 
 Your app repository needs **no credential for the test repository**: LIME hands the recording to
 the test repository's own workflow, and the Taqwright GitHub App opens the pull request there.
+
+## Security
+
+- **Pin what you trust.** Your repository runs this workflow's code with the secrets you pass it.
+  `@v1` moves when LIME ships a fix. If you need to choose exactly what runs, pin a full commit
+  SHA (`…/automate.yml@<40-char sha>`) and move it when you have reviewed the change.
+- **Pass only the secrets it needs**, as above, never `inherit`.
+- **Pull requests from forks are refused by default.** `/automate` builds and runs the pull
+  request's own code, build action included, with your secrets. From a fork, that is a stranger's
+  code. Only owners, members and collaborators can trigger it at all. On a fork's pull request a
+  maintainer must first add the label `lime-allow-fork` (after reading the change), or the caller
+  must set `allow-fork-prs: true`.
+- **Never attach a self-hosted runner to a public repository.** Anyone who can open a pull
+  request there can run code on it. Your runner belongs to your own, private repositories; this
+  repository has none.
+- **Nothing here holds a secret**, and calling it gives this repository no access to yours: the
+  workflow runs in your repository, on your runners.
 
 ## Self-hosted runners
 

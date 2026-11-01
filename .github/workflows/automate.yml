@@ -73,6 +73,13 @@ on:
         description: npm version of @taqwright/lime-cli. Never bare, so a stale copy on a self-hosted runner is never used.
         type: string
         default: latest
+      allow-fork-prs:
+        description: >
+          Run /automate on pull requests from forks. Off by default: /automate builds and runs the
+          pull request's code with your secrets, so on a fork that is a stranger's code. A
+          maintainer can still allow one pull request by adding the label lime-allow-fork.
+        type: boolean
+        default: false
       timeout-minutes:
         type: number
         default: 45
@@ -118,6 +125,7 @@ jobs:
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           PLATFORMS: ${{ inputs.platforms }}
+          ALLOW_FORKS: ${{ inputs.allow-fork-prs }}
           LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -130,6 +138,17 @@ jobs:
             *) echo "Not an /automate command — ignoring this comment."
                echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
+          # Never a fork's pull request unless the caller allows forks or a maintainer labelled this
+          # one: what runs next is the pull request's own code (its build action included), with
+          # this repository's secrets.
+          IS_FORK=$(gh pr view "$PR" -R "$REPO" --json isCrossRepository -q .isCrossRepository)
+          if [ "$IS_FORK" = "true" ] && [ "$ALLOW_FORKS" != "true" ]; then
+            LABELLED=$(gh pr view "$PR" -R "$REPO" --json labels -q '[.labels[].name] | index("lime-allow-fork") != null')
+            if [ "$LABELLED" != "true" ]; then
+              echo "::warning::This pull request comes from a fork, so /automate would run a stranger's code with this repository's secrets. A maintainer can allow it by adding the label lime-allow-fork, then commenting again."
+              echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
           # The platform: a trailing word naming one of the caller's platforms, else the first.
           LIST=$(printf '%s' "$PLATFORMS" | tr ',' ' ' | tr -s ' ')
           PLATFORM=$(printf '%s' "$LIST" | awk '{print $1}')
