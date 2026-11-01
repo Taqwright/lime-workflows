@@ -64,8 +64,10 @@ is the default.
 
 ### Your build action
 
-GitHub does not let `uses:` take an input, so the build lives at a **fixed path**, checked out from
-the PR head:
+GitHub does not let `uses:` take an input, so the build lives at a **fixed path**. The copy that
+runs is the one on your **default branch**, reviewed and merged, so a pull request cannot change
+the build steps that run with your secrets. A pull request's own copy is used only when the
+default branch has none (the pull request that first adds it):
 
 - `.github/actions/lime-build-android/action.yml`, `.github/actions/lime-build-ios/action.yml`, or
 - `.github/actions/lime-build/action.yml`, used when there is no per-platform one.
