@@ -1,0 +1,51 @@
+# LIME PR impact — one comment on every pull request in your APP repository: the screens and tests
+# the change reaches, the tests it needs updated, what is not automated yet, and suggested tests
+# you can record with `/automate N`.
+#
+# A REUSABLE workflow: call it from a short file you own (see README.md). It sends LIME the changed
+# files, the import graph this checkout builds, the changed user-facing strings and the diff hunks
+# (credential-looking values masked); the Taqwright GitHub App posts the comment. It always exits 0:
+# it never fails your build.
+
+name: lime-pr-impact
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: The LIME project (must exist).
+        type: string
+        required: true
+      runner:
+        description: JSON list of runner labels, e.g. '["self-hosted","macOS","ARM64"]'.
+        type: string
+        default: '["ubuntu-latest"]'
+      app-dir:
+        description: Where the app's source lives in this repository.
+        type: string
+        default: .
+      lime-cli-version:
+        description: npm version of @taqwright/lime-cli. Never bare, so a stale copy on a self-hosted runner is never used.
+        type: string
+        default: latest
+    secrets:
+      LIME_CI_TOKEN:
+        required: true
+
+jobs:
+  lime:
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: the analysis diffs this pull request against its base.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npx -y "@taqwright/lime-cli@$LIME_CLI_VERSION" pr --project "$LIME_PROJECT" --app-dir "$APP_DIR"
+        env:
+          LIME_PROJECT: ${{ inputs.project }}
+          APP_DIR: ${{ inputs.app-dir }}
+          LIME_CLI_VERSION: ${{ inputs.lime-cli-version }}
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}

@@ -1,0 +1,328 @@
+# /automate — a comment on a pull request in your APP repository records a test on a cloud device
+# and opens it as a pull request in your TEST repository.
+#
+# This is a REUSABLE workflow: your repository calls it from a short file you own, and LIME improves
+# it here without ever rewriting your files. See README.md for the caller and the inputs.
+#
+#   /automate 2                      record suggestion 2 from LIME's impact comment
+#   /automate 2 ios                  …on iOS, when the caller lists more than one platform
+#   /automate open Cart and verify the total is shown
+#
+# How it flows: build the app from the PR head with YOUR build action → upload the build straight
+# to the cloud provider (LIME never receives it) → LIME records the goal on a real device → LIME
+# hands the recording to the test repository's own workflow (taqwright-automate.yml), which writes
+# the test in your suite's conventions and has the Taqwright GitHub App open the pull request →
+# this job waits for it and the App replies on your pull request with the link.
+#
+# YOUR BUILD lives in your repository, at a fixed path (GitHub does not allow `uses:` to take an
+# input), and is checked out from the PR head:
+#   .github/actions/lime-build-android/action.yml   (or lime-build-ios/, per platform)
+#   .github/actions/lime-build/action.yml           (fallback, used when no per-platform one exists)
+# It may contain any steps. It must leave one installable file (.apk / .ipa) at the `artifact-*` path.
+
+name: lime-automate
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: The LIME project (must exist). Its bound test repository receives the test.
+        type: string
+        required: true
+      platforms:
+        description: Comma-separated platforms this app builds for; the first is the default.
+        type: string
+        default: android
+      cloud-provider:
+        description: lambdatest (TestMu AI) or browserstack.
+        type: string
+        default: lambdatest
+      runner-android:
+        description: JSON list of runner labels for Android, e.g. '["self-hosted","macOS","ARM64"]'.
+        type: string
+        default: '["ubuntu-latest"]'
+      device-android:
+        description: Exact provider device name.
+        type: string
+        default: Pixel 8
+      os-android:
+        description: Exact provider OS version.
+        type: string
+        default: '14'
+      artifact-android:
+        description: Path (from the repository root) of the .apk your build action leaves.
+        type: string
+        default: app/build/outputs/apk/debug/app-debug.apk
+      runner-ios:
+        description: JSON list of runner labels for iOS. A Mac is required to build iOS.
+        type: string
+        default: '["macos-latest"]'
+      device-ios:
+        description: Exact provider device name.
+        type: string
+        default: iPhone 15
+      os-ios:
+        description: Exact provider OS version.
+        type: string
+        default: '17'
+      artifact-ios:
+        description: Path (from the repository root) of the signed .ipa your build action leaves.
+        type: string
+        default: ''
+      lime-cli-version:
+        description: npm version of @taqwright/lime-cli. Never bare, so a stale copy on a self-hosted runner is never used.
+        type: string
+        default: latest
+      timeout-minutes:
+        type: number
+        default: 45
+    secrets:
+      LIME_CI_TOKEN:
+        required: true
+      LT_USERNAME:
+        required: false
+      LT_ACCESS_KEY:
+        required: false
+      BROWSERSTACK_USERNAME:
+        required: false
+      BROWSERSTACK_ACCESS_KEY:
+        required: false
+
+jobs:
+  # Is this a command, what is the goal, and which platform? Everything is gated on `ok`, so a
+  # comment that merely mentions /automate exits in seconds without reacting or spending.
+  parse:
+    # Only on pull requests, only for /automate, only from someone who can already write to this
+    # repository (this builds and RUNS code from the PR head), and never for a bot's own comment.
+    if: >
+      github.event.issue.pull_request &&
+      github.event.comment.user.type != 'Bot' &&
+      contains(github.event.comment.body, '/automate') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ${{ fromJSON(inputs.runner-android) }}
+    outputs:
+      ok: ${{ steps.goal.outputs.ok }}
+      goal: ${{ steps.goal.outputs.goal }}
+      who: ${{ steps.goal.outputs.who }}
+      platform: ${{ steps.goal.outputs.platform }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Parse the command
+        id: goal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+          COMMENT: ${{ github.event.comment.body }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          PLATFORMS: ${{ inputs.platforms }}
+          LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # The first NON-BLANK line must open with /automate (a comment box adds a leading CRLF
+          # when you press Enter first); "/automated" must not match.
+          FIRST=$(printf '%s' "$COMMENT" | tr -d '\r' | sed -e 's/^[[:space:]]*//' | grep -vE '^$' | head -1 || true)
+          case "$FIRST" in
+            /automate|/automate\ *) GOAL=$(printf '%s' "${FIRST#/automate}" | sed -e 's/^[[:space:]]*//') ;;
+            *) echo "Not an /automate command — ignoring this comment."
+               echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          # The platform: a trailing word naming one of the caller's platforms, else the first.
+          LIST=$(printf '%s' "$PLATFORMS" | tr ',' ' ' | tr -s ' ')
+          PLATFORM=$(printf '%s' "$LIST" | awk '{print $1}')
+          LAST=$(printf '%s' "$GOAL" | awk '{print tolower($NF)}')
+          for p in $LIST; do
+            if [ -n "$GOAL" ] && [ "$LAST" = "$p" ]; then
+              PLATFORM="$p"; GOAL=$(printf '%s' "$GOAL" | sed -E 's/[[:space:]]*[^[:space:]]+$//')
+            fi
+          done
+          case "$PLATFORM" in android|ios) ;; *) echo "::error::platforms must be android and/or ios." >&2; exit 1 ;; esac
+          # `/automate 2` names suggested test 2. The goal is read from LIME's own analysis of this
+          # pull request, never from the comment: a commenter picks a number, not what runs.
+          WHO=text
+          case "$GOAL" in
+            [0-9]|[0-9][0-9]|\#[0-9]|\#[0-9][0-9])
+              N="${GOAL#\#}"
+              if ! SUG="$(npx -y "$LIME_CLI" pr --suggestion "$N")"; then
+                npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN" || true
+                echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              GOAL="$(printf '%s' "$SUG" | jq -r .goal)"
+              WHO="$N" ;;
+          esac
+          # A bare /automate falls back to the pull request's own title and opening lines.
+          if [ -z "$GOAL" ]; then
+            GOAL="$(gh pr view "$PR" -R "$REPO" --json title,body \
+              --jq '.title + ". " + (.body // "" | split("\n") | .[0:5] | join(" "))')"
+          fi
+          {
+            echo "ok=true"
+            echo "who=$WHO"
+            echo "platform=$PLATFORM"
+            echo "goal=$GOAL"
+          } >> "$GITHUB_OUTPUT"
+          echo "Goal ($PLATFORM): $GOAL"
+      # The Taqwright GitHub App reacts and says what is being automated; LIME writes the words.
+      - name: Acknowledge the command
+        if: steps.goal.outputs.ok == 'true'
+        env:
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+          LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          npx -y "$LIME_CLI" pr reply --kind ack
+          npx -y "$LIME_CLI" pr reply --kind started --tests "${{ steps.goal.outputs.who }}" --run-url "$RUN"
+
+  automate:
+    needs: parse
+    if: needs.parse.outputs.ok == 'true'
+    # The platform's own machine: iOS needs a Mac, Android can run anywhere.
+    runs-on: ${{ fromJSON(needs.parse.outputs.platform == 'ios' && inputs.runner-ios || inputs.runner-android) }}
+    # LIME allows one recording per account at a time, so serialise. Never cancel-in-progress: a
+    # cancelled job skips its teardown and leaks a cloud device.
+    concurrency:
+      group: lime-automate-${{ github.repository }}
+      cancel-in-progress: false
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      PLATFORM: ${{ needs.parse.outputs.platform }}
+      DEVICE: ${{ needs.parse.outputs.platform == 'ios' && inputs.device-ios || inputs.device-android }}
+      DEVICE_OS: ${{ needs.parse.outputs.platform == 'ios' && inputs.os-ios || inputs.os-android }}
+      ARTIFACT: ${{ needs.parse.outputs.platform == 'ios' && inputs.artifact-ios || inputs.artifact-android }}
+      CLOUD_PROVIDER: ${{ inputs.cloud-provider }}
+      LIME_PROJECT: ${{ inputs.project }}
+      LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # The repository at the PR head, at the workspace root, so `./.github/actions/…` resolves to
+      # YOUR build action as this pull request has it.
+      - name: Check out the app at the PR head
+        uses: actions/checkout@v4
+      - name: Fetch the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+
+      # Your build. Per-platform action first, the plain one as a fallback.
+      - name: Build the app (your lime-build-${{ env.PLATFORM }} action)
+        if: env.PLATFORM == 'android' && hashFiles('.github/actions/lime-build-android/action.yml') != ''
+        uses: ./.github/actions/lime-build-android
+      - name: Build the app (your lime-build-${{ env.PLATFORM }} action)
+        if: env.PLATFORM == 'ios' && hashFiles('.github/actions/lime-build-ios/action.yml') != ''
+        uses: ./.github/actions/lime-build-ios
+      - name: Build the app (your lime-build action)
+        if: hashFiles(format('.github/actions/lime-build-{0}/action.yml', env.PLATFORM)) == '' && hashFiles('.github/actions/lime-build/action.yml') != ''
+        uses: ./.github/actions/lime-build
+      - name: Check the build is there
+        run: |
+          if [ -z "$ARTIFACT" ]; then
+            echo "::error::No artifact path for $PLATFORM. Set artifact-$PLATFORM in your caller workflow." >&2; exit 1
+          fi
+          if [ ! -f "$ARTIFACT" ]; then
+            if [ ! -f ".github/actions/lime-build-$PLATFORM/action.yml" ] && [ ! -f ".github/actions/lime-build/action.yml" ]; then
+              echo "::error::No build action. Add .github/actions/lime-build-$PLATFORM/action.yml (or .github/actions/lime-build/action.yml) to this repository — see https://github.com/Taqwright/lime-workflows#your-build-action" >&2
+            else
+              echo "::error::Your build action finished but $ARTIFACT does not exist. Fix artifact-$PLATFORM in the caller, or the build." >&2
+            fi
+            exit 1
+          fi
+          ls -l "$ARTIFACT"
+
+      # The build goes STRAIGHT to the provider; LIME takes the id only.
+      - name: Upload the build to the cloud provider
+        id: app
+        env:
+          LT_USERNAME: ${{ secrets.LT_USERNAME }}
+          LT_ACCESS_KEY: ${{ secrets.LT_ACCESS_KEY }}
+          BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+          BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+          NAME: ${{ github.event.repository.name }}-PR-${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if [ "$CLOUD_PROVIDER" = "lambdatest" ]; then
+            ID=$(curl -sS -u "$LT_USERNAME:$LT_ACCESS_KEY" \
+              -X POST https://manual-api.lambdatest.com/app/upload/realDevice \
+              -F "appFile=@$ARTIFACT" -F "name=$NAME" | jq -er .app_id)
+            echo "url=lt://$ID" >> "$GITHUB_OUTPUT"
+          else
+            URL=$(curl -sS -u "$BROWSERSTACK_USERNAME:$BROWSERSTACK_ACCESS_KEY" \
+              -X POST https://api-cloud.browserstack.com/app-automate/upload \
+              -F "file=@$ARTIFACT" | jq -er .app_url)
+            echo "url=$URL" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install lime-cli
+        run: npm install -g "$LIME_CLI"
+
+      # --keep-session holds the session open: the recording lives on it, and the hand-off below
+      # saves it before the device is released.
+      - name: Record the flow with LIME
+        id: record
+        env:
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+          LT_USERNAME: ${{ secrets.LT_USERNAME }}
+          LT_ACCESS_KEY: ${{ secrets.LT_ACCESS_KEY }}
+          BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+          BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+          GOAL: ${{ needs.parse.outputs.goal }}
+        run: |
+          lime-cli --goal "$GOAL" \
+            --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
+            --app-url "${{ steps.app.outputs.url }}" --project "$LIME_PROJECT" \
+            --keep-session
+
+      # LIME saves the recording off the session (never from this request) and starts the test
+      # repository's taqwright-automate.yml, which adapts it and has the Taqwright App open the PR.
+      - name: Hand the recording to the test repo
+        if: steps.record.outcome == 'success'
+        id: handoff
+        env:
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+        run: |
+          OUT="$(lime-cli pr automate --project "$LIME_PROJECT")"
+          echo "$OUT"
+          echo "journey=$(printf '%s' "$OUT" | jq -r .journeyId)" >> "$GITHUB_OUTPUT"
+
+      # Always: the device is billing until it is released.
+      - name: Release the device
+        if: always()
+        env:
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+        run: lime-cli disconnect || true
+
+      - name: Wait for the test pull request
+        if: steps.handoff.outputs.journey != ''
+        id: pr
+        env:
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+        run: |
+          OUT="$(lime-cli pr wait --journey "${{ steps.handoff.outputs.journey }}" --timeout 1200)"
+          echo "$OUT"
+          echo "url=$(printf '%s' "$OUT" | jq -r '.prUrl // empty')" >> "$GITHUB_OUTPUT"
+          echo "covered=$(printf '%s' "$OUT" | jq -r '.covered // false')" >> "$GITHUB_OUTPUT"
+
+      # The result, posted by the Taqwright GitHub App: added (with the test PR, whose own run
+      # verifies it), already covered, stuck while recording, or — when the job broke before any of
+      # those — failed.
+      - name: Report back on the pull request
+        if: always()
+        env:
+          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+          WHO: ${{ needs.parse.outputs.who }}
+        run: |
+          if [ -n "${{ steps.pr.outputs.url }}" ]; then
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:added" \
+              --test-pr-url "${{ steps.pr.outputs.url }}" --run-url "$RUN"
+          elif [ "${{ steps.pr.outputs.covered }}" = "true" ]; then
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:passed" --run-url "$RUN"
+          elif [ "${{ steps.record.outcome }}" = "failure" ]; then
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:stuck" --run-url "$RUN"
+          else
+            npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN"
+          fi
