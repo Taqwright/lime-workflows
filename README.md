@@ -62,6 +62,27 @@ jobs:
 goal. With `platforms: android,ios`, append the platform (`/automate 2 ios`); the first one listed
 is the default.
 
+**Several tests in one comment, up to 5.** Name several suggestions with commas, or put one goal
+per line under a bare `/automate`. Numbers and goals can mix, and list markers are optional:
+
+```
+/automate 1,3
+```
+```
+/automate
+- log in with demo@example.com and verify Home shows "Welcome"
+- add a product to the cart and verify the badge shows 1
+2
+```
+
+Commas separate **numbers** only, because a typed goal keeps its own commas. LIME reads the
+command and refuses one it will not run, before anything is built or a device is booked, with a
+reply that says why: more than 5 tests (it suggests how to split them), a suggestion number that is
+gone, one behind a feature flag, or a line that is not a test goal. The tests are recorded one after
+another, each waiting for its test pull request before the next, and they **all land in one pull
+request** in your test repository (test-repo template v28 or later). Allow about 15 minutes per
+test. The job's timeout grows to fit, with `timeout-minutes` as the floor.
+
 ### Your build action
 
 GitHub does not let `uses:` take an input, so the build lives at a **fixed path**. The copy that
@@ -186,7 +207,7 @@ runs:
 | `artifact-android` / `artifact-ios` | Gradle's debug APK / (none) | Where your build action leaves the installable file |
 | `lime-cli-version` | `latest` | Pin `@taqwright/lime-cli` if you need to |
 | `allow-fork-prs` | `false` | Run on pull requests from forks. Leave it off; label one PR `lime-allow-fork` instead |
-| `timeout-minutes` | `45` | For the build-and-record job |
+| `timeout-minutes` | `45` | For the build-and-record job. The floor: a command with several tests gets 30 + 15 per test when that is more |
 
 ### `pr-impact.yml`
 

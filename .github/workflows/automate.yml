@@ -5,8 +5,17 @@
 # it here without ever rewriting your files. See README.md for the caller and the inputs.
 #
 #   /automate 2                      record suggestion 2 from LIME's impact comment
+#   /automate 1,3                    several suggestions (up to 5 tests per comment)
 #   /automate 2 ios                  …on iOS, when the caller lists more than one platform
 #   /automate open Cart and verify the total is shown
+#   /automate                        several typed goals: one per line under a bare /automate
+#   - log in and verify Home shows "Welcome"
+#   - add a product and verify the cart badge shows 1
+#
+# Commas separate numbers only (a typed goal keeps its commas). LIME reads the command, and refuses
+# one it will not run — more than 5 tests, a gone suggestion, a line that is not a goal — with a
+# reply that says why, before anything is built or booked. The tests are recorded one after another
+# and all land in ONE pull request in your test repository.
 #
 # How it flows: build the app from the PR head with YOUR build action → upload the build straight
 # to the cloud provider (LIME never receives it) → LIME records the goal on a real device → LIME
@@ -109,9 +118,9 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner-android) }}
     outputs:
       ok: ${{ steps.goal.outputs.ok }}
-      goal: ${{ steps.goal.outputs.goal }}
-      who: ${{ steps.goal.outputs.who }}
+      tests: ${{ steps.goal.outputs.tests }}
       platform: ${{ steps.goal.outputs.platform }}
+      minutes: ${{ steps.goal.outputs.minutes }}
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -126,6 +135,7 @@ jobs:
           REPO: ${{ github.repository }}
           PLATFORMS: ${{ inputs.platforms }}
           ALLOW_FORKS: ${{ inputs.allow-fork-prs }}
+          TIMEOUT: ${{ inputs.timeout-minutes }}
           LIME_CLI: '@taqwright/lime-cli@${{ inputs.lime-cli-version }}'
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -149,42 +159,46 @@ jobs:
               echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
           fi
-          # The platform: a trailing word naming one of the caller's platforms, else the first.
-          LIST=$(printf '%s' "$PLATFORMS" | tr ',' ' ' | tr -s ' ')
-          PLATFORM=$(printf '%s' "$LIST" | awk '{print $1}')
-          LAST=$(printf '%s' "$GOAL" | awk '{print tolower($NF)}')
-          for p in $LIST; do
-            if [ -n "$GOAL" ] && [ "$LAST" = "$p" ]; then
-              PLATFORM="$p"; GOAL=$(printf '%s' "$GOAL" | sed -E 's/[[:space:]]*[^[:space:]]+$//')
-            fi
-          done
-          case "$PLATFORM" in android|ios) ;; *) echo "::error::platforms must be android and/or ios." >&2; exit 1 ;; esac
-          # `/automate 2` names suggested test 2. The goal is read from LIME's own analysis of this
-          # pull request, never from the comment: a commenter picks a number, not what runs.
-          WHO=text
-          case "$GOAL" in
-            [0-9]|[0-9][0-9]|\#[0-9]|\#[0-9][0-9])
-              N="${GOAL#\#}"
-              if ! SUG="$(npx -y "$LIME_CLI" pr --suggestion "$N")"; then
-                # The number goes with it, so LIME can say why: usually a newer push replaced the list.
-                npx -y "$LIME_CLI" pr reply --kind failed --tests "$N:failed" --run-url "$RUN" || true
-                echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
-              fi
-              GOAL="$(printf '%s' "$SUG" | jq -r .goal)"
-              WHO="$N" ;;
-          esac
+          # WHAT TO RECORD, read by LIME: the same reading its instant acknowledgement uses. Each
+          # number's goal comes from LIME's own analysis of this pull request, never from the
+          # comment: a commenter picks a number, not what runs. Exit 3 is a command LIME refused
+          # (too many tests, a gone suggestion, one behind a feature flag, a line that is not a
+          # goal) — it has replied on the pull request saying why, so this stops quietly.
+          set +e
+          PLAN="$(npx -y "$LIME_CLI" pr plan --platforms "$PLATFORMS")"
+          CODE=$?
+          set -e
+          if [ "$CODE" = 3 ]; then
+            echo "LIME refused this command and replied on the pull request."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$CODE" != 0 ]; then
+            npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN" || true
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          TESTS="$(printf '%s' "$PLAN" | jq -c '.tests')"
           # A bare /automate falls back to the pull request's own title and opening lines.
-          if [ -z "$GOAL" ]; then
+          if [ "$(printf '%s' "$TESTS" | jq 'length')" = 0 ]; then
             GOAL="$(gh pr view "$PR" -R "$REPO" --json title,body \
               --jq '.title + ". " + (.body // "" | split("\n") | .[0:5] | join(" "))')"
+            TESTS="$(jq -cn --arg g "$GOAL" '[{goal: $g}]')"
           fi
+          # The platform: the one the command named, else the caller's first.
+          PLATFORM="$(printf '%s' "$PLAN" | jq -r '.platform // ""')"
+          [ -n "$PLATFORM" ] || PLATFORM=$(printf '%s' "$PLATFORMS" | tr ',' ' ' | awk '{print $1}')
+          case "$PLATFORM" in android|ios) ;; *) echo "::error::platforms must be android and/or ios." >&2; exit 1 ;; esac
+          # Room for every test: each is recorded, handed over and written one after another,
+          # about 15 minutes apiece. The caller's timeout is the floor.
+          COUNT="$(printf '%s' "$TESTS" | jq 'length')"
+          MINUTES=$(( 30 + 15 * COUNT ))
+          [ "$MINUTES" -ge "$TIMEOUT" ] || MINUTES="$TIMEOUT"
           {
             echo "ok=true"
-            echo "who=$WHO"
+            echo "tests=$TESTS"
             echo "platform=$PLATFORM"
-            echo "goal=$GOAL"
+            echo "minutes=$MINUTES"
           } >> "$GITHUB_OUTPUT"
-          echo "Goal ($PLATFORM): $GOAL"
+          printf '%s' "$TESTS" | jq -r --arg p "$PLATFORM" 'to_entries[] | "Test \(.key + 1) (\($p)): \(.value.goal)"'
       # The Taqwright GitHub App reacts and says what is being automated; LIME writes the words.
       - name: Acknowledge the command
         if: steps.goal.outputs.ok == 'true'
@@ -194,14 +208,15 @@ jobs:
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.issue.number }}
-          # Through the environment, never pasted into the script: it is text someone typed.
-          GOAL: ${{ steps.goal.outputs.goal }}
+          # Through the environment, never pasted into the script: typed goals are text someone typed.
+          TESTS: ${{ steps.goal.outputs.tests }}
         run: |
           npx -y "$LIME_CLI" pr reply --kind ack
           # The head this run builds, so the reply names it rather than the last analysed one.
           HEAD="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid 2>/dev/null || true)"
-          npx -y "$LIME_CLI" pr reply --kind started --tests "${{ steps.goal.outputs.who }}" \
-            --goal "$GOAL" --head "$HEAD" --run-url "$RUN"
+          printf '%s' "$TESTS" > "$RUNNER_TEMP/lime-tests.json"
+          npx -y "$LIME_CLI" pr reply --kind started --tests-file "$RUNNER_TEMP/lime-tests.json" \
+            --head "$HEAD" --run-url "$RUN"
 
   automate:
     needs: parse
@@ -213,7 +228,8 @@ jobs:
     concurrency:
       group: lime-automate-${{ github.repository }}
       cancel-in-progress: false
-    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # The caller's timeout, raised to fit every test the command asked for (see the parse step).
+    timeout-minutes: ${{ fromJSON(needs.parse.outputs.minutes) }}
     env:
       PLATFORM: ${{ needs.parse.outputs.platform }}
       DEVICE: ${{ needs.parse.outputs.platform == 'ios' && inputs.device-ios || inputs.device-android }}
@@ -306,70 +322,83 @@ jobs:
       - name: Install lime-cli
         run: npm install -g "$LIME_CLI"
 
-      # --keep-session holds the session open: the recording lives on it, and the hand-off below
-      # saves it before the device is released.
-      - name: Record the flow with LIME
-        id: record
+      # EACH TEST IN TURN, on its own device session: record it (--keep-session holds the session,
+      # because the recording lives on it), hand the recording to the test repository's
+      # taqwright-automate.yml (LIME saves it off the session, never from this request), release
+      # the device, and WAIT for the test pull request before the next hand-off. The wait is not
+      # optional: the test repository runs one job and holds one more, and a third hand-off would
+      # cancel the one waiting. Every test lands in the same test pull request.
+      #
+      # A test that fails does not stop the others; each one's outcome is kept for the reply.
+      - name: Record and hand over each test
+        id: tests
         env:
           LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
           LT_USERNAME: ${{ secrets.LT_USERNAME }}
           LT_ACCESS_KEY: ${{ secrets.LT_ACCESS_KEY }}
           BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
           BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
-          GOAL: ${{ needs.parse.outputs.goal }}
+          APP_URL: ${{ steps.app.outputs.url }}
+          # Through the environment, never pasted into the script: typed goals are text someone typed.
+          TESTS: ${{ needs.parse.outputs.tests }}
         run: |
-          lime-cli --goal "$GOAL" \
-            --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
-            --app-url "${{ steps.app.outputs.url }}" --project "$LIME_PROJECT" \
-            --keep-session
+          set -uo pipefail
+          RESULTS="$RUNNER_TEMP/lime-results.json"
+          echo '[]' > "$RESULTS"
+          COUNT="$(printf '%s' "$TESTS" | jq 'length')"
+          for i in $(seq 0 $(( COUNT - 1 ))); do
+            ENTRY="$(printf '%s' "$TESTS" | jq -c ".[$i]")"
+            GOAL="$(printf '%s' "$ENTRY" | jq -r '.goal')"
+            echo "::group::Test $(( i + 1 )) of $COUNT: $GOAL"
+            OUTCOME=failed; JOURNEY=""
+            if lime-cli --goal "$GOAL" \
+                 --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
+                 --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session; then
+              OUT="$(lime-cli pr automate --project "$LIME_PROJECT")" && echo "$OUT"
+              JOURNEY="$(printf '%s' "${OUT:-}" | jq -r '.journeyId // empty' 2>/dev/null || true)"
+            else
+              OUTCOME=stuck
+            fi
+            # Always: the device is billing until it is released.
+            lime-cli disconnect || true
+            if [ -n "$JOURNEY" ]; then
+              WAITED="$(lime-cli pr wait --journey "$JOURNEY" --timeout 1200)" && echo "$WAITED"
+              URL="$(printf '%s' "${WAITED:-}" | jq -r '.prUrl // empty' 2>/dev/null || true)"
+              if [ -n "$URL" ]; then
+                OUTCOME=added
+                echo "url=$URL" >> "$GITHUB_OUTPUT"
+              elif [ "$(printf '%s' "${WAITED:-}" | jq -r '.covered // false' 2>/dev/null)" = "true" ]; then
+                OUTCOME=passed
+              fi
+            fi
+            jq --argjson e "$ENTRY" --arg o "$OUTCOME" --arg j "$JOURNEY" \
+              '. + [($e | if .n != null then {n} else {goal} end) + {outcome: $o}
+                    + (if $j == "" then {} else {journeyId: ($j | tonumber)} end)]' \
+              "$RESULTS" > "$RESULTS.tmp" && mv "$RESULTS.tmp" "$RESULTS"
+            echo "Test $(( i + 1 )): $OUTCOME"
+            echo "::endgroup::"
+          done
 
-      # LIME saves the recording off the session (never from this request) and starts the test
-      # repository's taqwright-automate.yml, which adapts it and has the Taqwright App open the PR.
-      - name: Hand the recording to the test repo
-        if: steps.record.outcome == 'success'
-        id: handoff
-        env:
-          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
-        run: |
-          OUT="$(lime-cli pr automate --project "$LIME_PROJECT")"
-          echo "$OUT"
-          echo "journey=$(printf '%s' "$OUT" | jq -r .journeyId)" >> "$GITHUB_OUTPUT"
-
-      # Always: the device is billing until it is released.
+      # Always: a session left open by a run that died mid-test is still billing.
       - name: Release the device
         if: always()
         env:
           LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
         run: lime-cli disconnect || true
 
-      - name: Wait for the test pull request
-        if: steps.handoff.outputs.journey != ''
-        id: pr
-        env:
-          LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
-        run: |
-          OUT="$(lime-cli pr wait --journey "${{ steps.handoff.outputs.journey }}" --timeout 1200)"
-          echo "$OUT"
-          echo "url=$(printf '%s' "$OUT" | jq -r '.prUrl // empty')" >> "$GITHUB_OUTPUT"
-          echo "covered=$(printf '%s' "$OUT" | jq -r '.covered // false')" >> "$GITHUB_OUTPUT"
-
-      # The result, posted by the Taqwright GitHub App: added (with the test PR, whose own run
-      # verifies it), already covered, stuck while recording, or — when the job broke before any of
-      # those — failed.
+      # The result, posted by the Taqwright GitHub App in ONE comment: each test added (in the test
+      # PR, whose own run verifies it), already covered, stuck while recording, or failed — and,
+      # when the job broke before any test finished, that it failed.
       - name: Report back on the pull request
         if: always()
         env:
           LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
-          GOAL: ${{ needs.parse.outputs.goal }}
-          WHO: ${{ needs.parse.outputs.who }}
+          TEST_PR: ${{ steps.tests.outputs.url }}
         run: |
-          if [ -n "${{ steps.pr.outputs.url }}" ]; then
-            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:added" --goal "$GOAL" \
-              --test-pr-url "${{ steps.pr.outputs.url }}" --run-url "$RUN"
-          elif [ "${{ steps.pr.outputs.covered }}" = "true" ]; then
-            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:passed" --goal "$GOAL" --run-url "$RUN"
-          elif [ "${{ steps.record.outcome }}" = "failure" ]; then
-            npx -y "$LIME_CLI" pr reply --kind outcome --tests "$WHO:stuck" --goal "$GOAL" --run-url "$RUN"
+          RESULTS="$RUNNER_TEMP/lime-results.json"
+          if [ -f "$RESULTS" ] && [ "$(jq 'length' "$RESULTS")" != 0 ]; then
+            npx -y "$LIME_CLI" pr reply --kind outcome --tests-file "$RESULTS" \
+              ${TEST_PR:+--test-pr-url "$TEST_PR"} --run-url "$RUN"
           else
             npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN"
           fi
