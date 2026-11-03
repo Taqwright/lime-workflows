@@ -366,9 +366,16 @@ jobs:
             GOAL="$(printf '%s' "$ENTRY" | jq -r '.goal')"
             echo "::group::Test $(( i + 1 )) of $COUNT: $GOAL"
             OUTCOME=failed; JOURNEY=""; STUCK_ID=""
-            if lime-cli --goal "$GOAL" \
+            lime-cli --goal "$GOAL" \
                  --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
-                 --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session; then
+                 --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session
+            RC=$?
+            if [ "$RC" = 4 ]; then
+              # LOST CONTACT WITH LIME mid-recording (lime-cli exit 4, after retrying): nothing got
+              # stuck, so there is no stuck record to ask for. The reply says "interrupted" and how
+              # to retry, not "the recording got stuck" (demo-app#27, a Cloudflare 1001 page).
+              OUTCOME=interrupted
+            elif [ "$RC" = 0 ]; then
               OUT="$(lime-cli pr automate --project "$LIME_PROJECT" ${HOLD:+--hold-pr})" && echo "$OUT"
               JOURNEY="$(printf '%s' "${OUT:-}" | jq -r '.journeyId // empty' 2>/dev/null || true)"
               # Recorded, but not handed to the test repository (lime-cli already retried a
