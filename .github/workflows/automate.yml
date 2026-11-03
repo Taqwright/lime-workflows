@@ -329,6 +329,13 @@ jobs:
       # optional: the test repository runs one job and holds one more, and a third hand-off would
       # cancel the one waiting. Every test lands in the same test pull request.
       #
+      # SEVERAL TESTS OPEN THAT PULL REQUEST ONCE, AT THE END. Each is handed over with --hold-pr,
+      # so the test repository pushes it with no pull request open, and `pr open-held` has LIME's
+      # App open it after the last. A test pushed onto an OPEN pull request with the test
+      # repository's GITHUB_TOKEN raises a run GitHub holds until someone approves it; a push with
+      # none open raises nothing, and the App's pull request runs without asking. One test opens
+      # its pull request at once, as before. An older lime-cli or test-repo template never holds.
+      #
       # A test that fails does not stop the others; each one's outcome is kept for the reply.
       - name: Record and hand over each test
         id: tests
@@ -346,6 +353,8 @@ jobs:
           RESULTS="$RUNNER_TEMP/lime-results.json"
           echo '[]' > "$RESULTS"
           COUNT="$(printf '%s' "$TESTS" | jq 'length')"
+          HOLD=""; [ "$COUNT" -gt 1 ] && HOLD=1
+          HELD=0
           for i in $(seq 0 $(( COUNT - 1 ))); do
             ENTRY="$(printf '%s' "$TESTS" | jq -c ".[$i]")"
             GOAL="$(printf '%s' "$ENTRY" | jq -r '.goal')"
@@ -354,7 +363,7 @@ jobs:
             if lime-cli --goal "$GOAL" \
                  --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
                  --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session; then
-              OUT="$(lime-cli pr automate --project "$LIME_PROJECT")" && echo "$OUT"
+              OUT="$(lime-cli pr automate --project "$LIME_PROJECT" ${HOLD:+--hold-pr})" && echo "$OUT"
               JOURNEY="$(printf '%s' "${OUT:-}" | jq -r '.journeyId // empty' 2>/dev/null || true)"
             else
               OUTCOME=stuck
@@ -374,6 +383,10 @@ jobs:
                 echo "url=$URL" >> "$GITHUB_OUTPUT"
               elif [ "$(printf '%s' "${WAITED:-}" | jq -r '.covered // false' 2>/dev/null)" = "true" ]; then
                 OUTCOME=passed
+              elif [ "$(printf '%s' "${WAITED:-}" | jq -r '.held // false' 2>/dev/null)" = "true" ]; then
+                # Pushed; its pull request opens after the last test (below).
+                OUTCOME=added
+                HELD=1
               fi
             fi
             jq --argjson e "$ENTRY" --arg o "$OUTCOME" --arg j "$JOURNEY" --arg k "$STUCK_ID" \
@@ -384,6 +397,18 @@ jobs:
             echo "Test $(( i + 1 )): $OUTCOME"
             echo "::endgroup::"
           done
+
+          # The held pull request, opened once by LIME's App: its run tests every test above and
+          # needs nobody to approve it. The tests are pushed whatever happens here.
+          if [ "$HELD" = 1 ]; then
+            if OPENED="$(lime-cli pr open-held)"; then
+              echo "$OPENED"
+              URL="$(printf '%s' "$OPENED" | jq -r '.url // empty' 2>/dev/null || true)"
+              [ -n "$URL" ] && echo "url=$URL" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::LIME could not open the test pull request. The tests are pushed to the test repository's taqwright/pr-* branch for this pull request; open one from it."
+            fi
+          fi
 
       # Always: a session left open by a run that died mid-test is still billing.
       - name: Release the device
