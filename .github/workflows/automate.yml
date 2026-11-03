@@ -172,9 +172,15 @@ jobs:
             echo "LIME refused this command and replied on the pull request."
             echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # LIME COULD NOT BE ASKED, even after lime-cli waited out a restart (~2 minutes): this
+          # command did not run. The reply goes through LIME too, so it may not arrive — and the
+          # job used to end GREEN then, with nothing on the pull request to say so (a comment made
+          # during a deploy, demo-app#27). It fails red now, with the reason on the run.
           if [ "$CODE" != 0 ]; then
             npx -y "$LIME_CLI" pr reply --kind failed --run-url "$RUN" || true
-            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::error title=/automate did not run::LIME could not be reached (lime-cli pr plan exited $CODE after retrying for about 2 minutes — LIME may have been restarting). Nothing was recorded. Comment the same /automate again." >&2
+            exit 1
           fi
           TESTS="$(printf '%s' "$PLAN" | jq -c '.tests')"
           # A bare /automate falls back to the pull request's own title and opening lines.
