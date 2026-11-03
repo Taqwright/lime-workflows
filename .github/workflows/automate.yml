@@ -366,10 +366,14 @@ jobs:
             GOAL="$(printf '%s' "$ENTRY" | jq -r '.goal')"
             echo "::group::Test $(( i + 1 )) of $COUNT: $GOAL"
             OUTCOME=failed; JOURNEY=""; STUCK_ID=""
+            # `|| RC=$?`, never a bare command then `RC=$?`: GitHub runs this step with `bash -e`, which
+            # ends the whole step on the first failing command — a recording that could not even
+            # connect stopped every later test and the reply (demo-app#29). `set -uo pipefail` above
+            # does not turn -e off; a command on the left of || is exempt from it.
+            RC=0
             lime-cli --goal "$GOAL" \
                  --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
-                 --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session
-            RC=$?
+                 --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session || RC=$?
             if [ "$RC" = 4 ]; then
               # LOST CONTACT WITH LIME mid-recording (lime-cli exit 4, after retrying): nothing got
               # stuck, so there is no stuck record to ask for. The reply says "interrupted" and how
