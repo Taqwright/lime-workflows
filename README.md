@@ -79,9 +79,16 @@ Commas separate **numbers** only, because a typed goal keeps its own commas. LIM
 command and refuses one it will not run, before anything is built or a device is booked, with a
 reply that says why: more than 5 tests (it suggests how to split them), a suggestion number that is
 gone, one behind a feature flag, or a line that is not a test goal. The tests are recorded one after
-another, each waiting for its test pull request before the next, and they **all land in one pull
-request** in your test repository (test-repo template v28 or later). Allow about 15 minutes per
-test. The job's timeout grows to fit, with `timeout-minutes` as the floor.
+another, each waiting for the test repository's workflow before the next, and they **all land in
+one pull request** in your test repository (test-repo template v28 or later). Allow about 15
+minutes per test. The job's timeout grows to fit, with `timeout-minutes` as the floor.
+
+With test-repo template v30 or later, that pull request **opens once, after the last test**, and
+its run starts on its own. Before v30 it opened after the first test, and each later test was a
+push onto it with the test repository's `GITHUB_TOKEN`. GitHub holds a run raised that way until
+someone with write access clicks *Approve workflows to run*. A second `/automate` later, on a pull
+request whose test pull request is already open, still adds to it that way, so that run still
+needs approval.
 
 ### Your build action
 
