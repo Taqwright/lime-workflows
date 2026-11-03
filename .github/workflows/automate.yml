@@ -365,6 +365,10 @@ jobs:
                  --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session; then
               OUT="$(lime-cli pr automate --project "$LIME_PROJECT" ${HOLD:+--hold-pr})" && echo "$OUT"
               JOURNEY="$(printf '%s' "${OUT:-}" | jq -r '.journeyId // empty' 2>/dev/null || true)"
+              # Recorded, but not handed to the test repository (lime-cli already retried a
+              # network failure): nothing verified it, so the reply must not say it failed
+              # verification. It says how to retry instead.
+              [ -z "$JOURNEY" ] && OUTCOME=not-handed
             else
               OUTCOME=stuck
               # Why it stopped, read by LIME off the session this job still holds, and the
