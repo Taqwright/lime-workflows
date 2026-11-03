@@ -350,7 +350,7 @@ jobs:
             ENTRY="$(printf '%s' "$TESTS" | jq -c ".[$i]")"
             GOAL="$(printf '%s' "$ENTRY" | jq -r '.goal')"
             echo "::group::Test $(( i + 1 )) of $COUNT: $GOAL"
-            OUTCOME=failed; JOURNEY=""
+            OUTCOME=failed; JOURNEY=""; STUCK_ID=""
             if lime-cli --goal "$GOAL" \
                  --cloud "$CLOUD_PROVIDER" --device "$DEVICE" --platform "$PLATFORM" --os "$DEVICE_OS" \
                  --app-url "$APP_URL" --project "$LIME_PROJECT" --keep-session; then
@@ -358,6 +358,11 @@ jobs:
               JOURNEY="$(printf '%s' "${OUT:-}" | jq -r '.journeyId // empty' 2>/dev/null || true)"
             else
               OUTCOME=stuck
+              # Why it stopped, read by LIME off the session this job still holds, and the
+              # screen it stopped on committed to the test repository. Never fails the job;
+              # an older lime-cli prints no record id and the reply simply says less.
+              STUCK="$(lime-cli pr stuck --project "$LIME_PROJECT" || true)" && echo "$STUCK"
+              STUCK_ID="$(printf '%s' "${STUCK:-}" | jq -r '.stuckId // empty' 2>/dev/null || true)"
             fi
             # Always: the device is billing until it is released.
             lime-cli disconnect || true
@@ -371,9 +376,10 @@ jobs:
                 OUTCOME=passed
               fi
             fi
-            jq --argjson e "$ENTRY" --arg o "$OUTCOME" --arg j "$JOURNEY" \
+            jq --argjson e "$ENTRY" --arg o "$OUTCOME" --arg j "$JOURNEY" --arg k "$STUCK_ID" \
               '. + [($e | if .n != null then {n} else {goal} end) + {outcome: $o}
-                    + (if $j == "" then {} else {journeyId: ($j | tonumber)} end)]' \
+                    + (if $j == "" then {} else {journeyId: ($j | tonumber)} end)
+                    + (if ($k | test("^[0-9]+$")) then {stuckId: ($k | tonumber)} else {} end)]' \
               "$RESULTS" > "$RESULTS.tmp" && mv "$RESULTS.tmp" "$RESULTS"
             echo "Test $(( i + 1 )): $OUTCOME"
             echo "::endgroup::"
