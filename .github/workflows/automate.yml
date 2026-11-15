@@ -103,6 +103,13 @@ on:
         required: false
       BROWSERSTACK_ACCESS_KEY:
         required: false
+      LIME_HOOKS_ENV:
+        description: >
+          Environment for goal hooks (.lime/hooks.json): one NAME=value per line, e.g.
+          TEST_USERS_API_KEY= followed by that secret (see the README). Given to the recording step only,
+          where a hook's request reads it as ${env.NAME}. Names LIME, the cloud provider, GitHub or
+          the runner use cannot be set this way.
+        required: false
 
 jobs:
   # Is this a command, what is the goal, and which platform? Everything is gated on `ok`, so a
@@ -257,6 +264,11 @@ jobs:
           for d in .github/actions/lime-build .github/actions/lime-build-android .github/actions/lime-build-ios; do
             if [ -f "$d/action.yml" ]; then cp -R "$d" "$RUNNER_TEMP/lime-build-actions/"; echo "Using $d from the default branch."; fi
           done
+          # Goal hooks too, and more strictly: a hook's request carries LIME_HOOKS_ENV, so a pull
+          # request that edits .lime/hooks.json could send the key anywhere. Only the default
+          # branch's file is ever used — a pull request that adds one takes effect once merged.
+          mkdir -p "$RUNNER_TEMP/lime-hooks"
+          if [ -f .lime/hooks.json ]; then cp .lime/hooks.json "$RUNNER_TEMP/lime-hooks/hooks.json"; echo "Using .lime/hooks.json from the default branch."; fi
       - name: Check out the app at the PR head
         env:
           GH_TOKEN: ${{ github.token }}
@@ -273,6 +285,12 @@ jobs:
             cp -R "$d" .github/actions/
           done
           ls -d .github/actions/lime-build* 2>/dev/null || echo "No build action on the default branch or in this pull request."
+          # The pull request's own hooks file is never used (see above), not even where the default
+          # branch has none.
+          rm -f .lime/hooks.json
+          if [ -f "$RUNNER_TEMP/lime-hooks/hooks.json" ]; then
+            mkdir -p .lime && cp "$RUNNER_TEMP/lime-hooks/hooks.json" .lime/hooks.json
+          fi
 
       # Your build. Per-platform action first, the plain one as a fallback.
       - name: Build the app (your lime-build-${{ env.PLATFORM }} action)
@@ -354,8 +372,28 @@ jobs:
           APP_URL: ${{ steps.app.outputs.url }}
           # Through the environment, never pasted into the script: typed goals are text someone typed.
           TESTS: ${{ needs.parse.outputs.tests }}
+          LIME_HOOKS_ENV: ${{ secrets.LIME_HOOKS_ENV }}
         run: |
           set -uo pipefail
+          # Goal hooks' environment: NAME=value lines, exported for lime-cli (a hook reads
+          # ${env.NAME}) and masked. Names this job relies on are refused rather than overridden.
+          if [ -n "${LIME_HOOKS_ENV:-}" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              line="${line%$'\r'}"
+              case "$line" in ''|'#'*) continue ;; esac
+              name="${line%%=*}"; value="${line#*=}"
+              if [ "$name" = "$line" ] || ! [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                echo "::error::LIME_HOOKS_ENV: each line must be NAME=value." >&2; exit 1
+              fi
+              case "$name" in
+                PATH|HOME|SHELL|TMPDIR|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|LD_*|DYLD_*|LIME_*|LT_*|BROWSERSTACK_*|GITHUB_*|RUNNER_*|ACTIONS_*|APP_URL|TESTS)
+                  echo "::error::LIME_HOOKS_ENV: $name cannot be set this way." >&2; exit 1 ;;
+              esac
+              [ -n "$value" ] && echo "::add-mask::$value"
+              export "$name=$value"
+            done <<< "$LIME_HOOKS_ENV"
+            unset LIME_HOOKS_ENV
+          fi
           RESULTS="$RUNNER_TEMP/lime-results.json"
           echo '[]' > "$RESULTS"
           COUNT="$(printf '%s' "$TESTS" | jq 'length')"
