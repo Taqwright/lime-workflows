@@ -235,6 +235,31 @@ workflow **every** secret in your repository, when it needs only these:
 | `LIME_CI_TOKEN` | both, a CI token from LIME (Settings → Access) |
 | `LT_USERNAME`, `LT_ACCESS_KEY` | `automate.yml` with TestMu AI |
 | `BROWSERSTACK_USERNAME`, `BROWSERSTACK_ACCESS_KEY` | `automate.yml` with BrowserStack |
+| `LIME_HOOKS_ENV` | `automate.yml`, only if your goals call [goal hooks](#goal-hooks) |
+
+### Goal hooks
+
+A goal can create its own test data before the journey starts —
+`/automate Call createTestUser, log in as ${USERNAME} with ${PASSWORD} and verify …` — by calling a
+hook declared in `.lime/hooks.json` in **this app repository** (format: `lime-cli hooks --help`,
+needs `lime-cli` 0.30.0 or later and the `goal_hooks` feature on your LIME account). lime-cli
+runs the hook's HTTP request on the runner before the device connects.
+
+A hook's request usually needs a key. Pass it as `LIME_HOOKS_ENV`, one `NAME=value` per line, and
+the hook reads it as `${env.NAME}`:
+
+```yaml
+    secrets:
+      LIME_CI_TOKEN: ${{ secrets.LIME_CI_TOKEN }}
+      LT_USERNAME: ${{ secrets.LT_USERNAME }}
+      LT_ACCESS_KEY: ${{ secrets.LT_ACCESS_KEY }}
+      LIME_HOOKS_ENV: |
+        TEST_USERS_API_KEY=${{ secrets.TEST_USERS_API_KEY }}
+```
+
+It is given to the recording step only, every value is masked, and names this workflow relies
+on (`LIME_*`, `LT_*`, `BROWSERSTACK_*`, `GITHUB_*`, `RUNNER_*`, `PATH`, `NODE_OPTIONS` …) are
+refused rather than overridden.
 
 Your app repository needs **no credential for the test repository**: LIME hands the recording to
 the test repository's own workflow, and the Taqwright GitHub App opens the pull request there.
@@ -253,6 +278,11 @@ the test repository's own workflow, and the Taqwright GitHub App opens the pull 
 - **Never attach a self-hosted runner to a public repository.** Anyone who can open a pull
   request there can run code on it. Your runner belongs to your own, private repositories; this
   repository has none.
+- **Goal hooks run the default branch's `.lime/hooks.json`, never a pull request's.** A hook's
+  request carries `LIME_HOOKS_ENV`, so a pull request that edited the file could send your key
+  anywhere. A pull request's copy is removed before recording, even where the default branch has
+  none — so a pull request that adds hooks takes effect once it is merged. This is stricter than
+  build actions, on purpose.
 - **Nothing here holds a secret**, and calling it gives this repository no access to yours: the
   workflow runs in your repository, on your runners.
 
